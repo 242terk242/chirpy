@@ -1,31 +1,53 @@
 package main
-
+import _ "github.com/lib/pq"
 import (
 	"log"
 	"net/http"
+	"sync/atomic"
 )
 
-type Server struct {
-	Addr string
+godotenv.Load()
+dbURL := os.Getenv("DB_URL")
+db, err := sql.Open("postgres", dbURL)
+if err != nil {
+	log.Fatalf("Failed to connect to database: %v", err)
+}
+defer db.Close()	
+
+type apiConfig struct {
+	fileserverHits atomic.Int32
+	database *database.Queries
+}
+
+func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cfg.fileserverHits.Add(1)
+		next.ServeHTTP(w, r)
+	})
 }
 
 func main() {
-	// Use the http.NewServeMux() function to create an empty servemux.
+	dbQueries := database.New(db)
+
+	apiCfg := apiConfig{
+		fileserverHits: atomic.Int32{},
+	}
+
 	mux := http.NewServeMux()
 
-	// Use the http.RedirectHandler() function to create a handler which 307
-	// redirects all requests it receives to http://example.org.
-	rh := http.RedirectHandler("http://example.org", 307)
+	// NOTE: method-based patterns, no trailing slash, and using the existing handlers
 
-	// Next we use the mux.Handle() function to register this with our new
-	// servemux, so it acts as the handler for all incoming requests with the URL
-	// path /foo.
-	mux.Handle("/foo", rh)
+	fsHandler := apiCfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir("."))))
+	mux.Handle("/app/", fsHandler)
+	// method-specific routing, using existing handlers
+	mux.HandleFunc("GET /api/healthz", handlerReadiness)
+	mux.HandleFunc("POST /admin/reset", apiCfg.handlerReset)
+	mux.HandleFunc("GET /admin/metrics", apiCfg.handlerMetrics)
+	mux.HandleFunc("POST /api/validate_chirp", handlerValidate)
+
+	//mux.HandleFunc("GET /api/metrics", apiCfg.handlerMetrics)
 
 	log.Print("Listening...")
 
-	// Then we create a new server and start listening for incoming requests
-	// with the http.ListenAndServe() function, passing in our servemux for it to
-	// match requests against as the second argument.
 	http.ListenAndServe(":8080", mux)
 }
